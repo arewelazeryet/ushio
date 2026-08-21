@@ -129,4 +129,59 @@ impl Database {
 
         result
     }
+
+    pub async fn get_bucketed_scores(
+        &self,
+        bucket_range: BucketTimeRange,
+    ) -> Result<Vec<BucketedResponse>> {
+        tracing::info!(time_range = ?bucket_range, "Getting unique buckets");
+        counter!(format!(
+            "athena.database.get_{}_unique_scores.query_count",
+            bucket_range
+        ))
+        .increment(1);
+
+        let mut trans = self.begin_with_chunkwise_aggregation_disabled().await?;
+
+        let mut builder: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new("");
+        builder.push(
+            r#"
+            SELECT
+                ((user_id / 2000000) * 2000000)::INT8 AS "bucket_floor",
+                (COUNT(*) FILTER (WHERE lazer))::INT8 AS "lazer",
+                (COUNT(*) FILTER (WHERE NOT lazer))::INT8 AS "stable",
+                0::INT8 AS "both"
+            FROM scores
+            WHERE ended_at >= NOW() - INTERVAL "#,
+        );
+        match bucket_range {
+            BucketTimeRange::Day => {
+                builder.push("'1 day'");
+            }
+            BucketTimeRange::Week => {
+                builder.push("'7 days'");
+            }
+            BucketTimeRange::Month => {
+                builder.push("'30 days'");
+            }
+        }
+        builder.push(
+            r#"
+            GROUP BY "bucket_floor"
+            ORDER BY "bucket_floor" ASC;
+        "#,
+        );
+
+        let query = builder.build_query_as::<BucketedResponse>();
+        let result = query
+            .fetch_all(&mut *trans)
+            .await
+            .wrap_err("Failed to get monthly unique users");
+
+        trans.commit().await?;
+
+        tracing::info!(time_range = ?bucket_range, "Got unique buckets");
+
+        result
+    }
 }

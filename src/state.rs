@@ -146,6 +146,17 @@ impl AppState {
         }
     }
 
+    pub async fn get_unique_scores(
+        &self,
+        bucket_range: BucketTimeRange,
+    ) -> Result<Vec<UserIdDistributionEntry>> {
+        match bucket_range {
+            BucketTimeRange::Day => self.get_daily_scores().await,
+            BucketTimeRange::Week => self.get_weekly_scores().await,
+            BucketTimeRange::Month => self.get_monthly_scores().await,
+        }
+    }
+
     cache_json_pair!(
         latest_changelog,
         key = "athena:changelogs:changelog:latest",
@@ -225,6 +236,34 @@ impl AppState {
         }
     );
 
+    cache_json_pair!(
+        daily_scores,
+        key = "athena:unique_scores:daily",
+        ty = Vec<UserIdDistributionEntry>,
+        ttl = 86400,
+        refresh => |server| {
+            server.database().get_bucketed_scores(BucketTimeRange::Day).await?.into_iter().map(UserIdDistributionEntry::from).collect()
+        }
+    );
+
+    cache_json_pair!(
+        weekly_scores,
+        key = "athena:unique_scores:weekly",
+        ty = Vec<UserIdDistributionEntry>,
+        ttl = 86400,
+        refresh => |server| {
+            server.database().get_bucketed_scores(BucketTimeRange::Week).await?.into_iter().map(UserIdDistributionEntry::from).collect()
+        }
+    );
+    cache_json_pair!(
+        monthly_scores,
+        key = "athena:unique_scores:monthly",
+        ty = Vec<UserIdDistributionEntry>,
+        ttl = 604800,
+        refresh => |server| {
+            server.database().get_bucketed_scores(BucketTimeRange::Month).await?.into_iter().map(UserIdDistributionEntry::from).collect()
+        }
+    );
     pub async fn set_daily_historic_graphs(&self, value: &[ScoreAggregateResponse]) -> Result<()> {
         let payload = serde_json::to_value(value)?;
 

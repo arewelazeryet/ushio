@@ -76,6 +76,26 @@ async fn get_unique_users(
         .apply(Ok)
 }
 
+async fn get_unique_scores(
+    Query(range): Query<BucketQuery>,
+    State(state): State<SharedState>,
+) -> Result<Json<Vec<UserIdDistributionEntry>>, (StatusCode, String)> {
+    state
+        .get_unique_scores(range.range)
+        .await
+        .inspect_err(|e| {
+            tracing::warn!(
+                "Failed to return daily unique scores: {:?}",
+                e.chain().map(|e| e.to_string()).collect::<Vec<_>>()
+            )
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .apply(Json)
+        .apply(Ok)
+}
+
 pub(crate) fn router() -> Router<SharedState> {
-    Router::new().route("/distribution", get(get_unique_users))
+    Router::new()
+        .route("/distribution", get(get_unique_users))
+        .route("/distribution/scores", get(get_unique_scores))
 }
