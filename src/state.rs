@@ -1,4 +1,4 @@
-use color_eyre::Result;
+use color_eyre::{Result, eyre::Context};
 use redis::{AsyncCommands, JsonAsyncCommands};
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
@@ -264,54 +264,77 @@ impl AppState {
             server.database().get_bucketed_scores(BucketTimeRange::Month).await?.into_iter().map(UserIdDistributionEntry::from).collect()
         }
     );
+
     pub async fn set_daily_historic_graphs(&self, value: &[ScoreAggregateResponse]) -> Result<()> {
         let payload = serde_json::to_value(value)?;
+        tracing::debug!(key = "athena:daily_graph", json = ?payload, "Setting value");
 
         let now = OffsetDateTime::now_utc();
-        let tomorrow = now
-            .replace_day(now.saturating_add(time::Duration::days(1)).day())?
-            .replace_time(Time::from_hms(1, 0, 0)?);
+        let tomorrow = (now + time::Duration::days(1)).replace_time(Time::from_hms(1, 0, 0)?);
         let _: () = self
             .cache()
             .await
             .json_set("athena:daily_graph", "$", &payload)
-            .await?;
-        let _: bool = self
+            .await
+            .wrap_err("Failed to set value of 'athena:daily_graph'")?;
+        let is_set: bool = self
             .cache()
             .await
             .expire_at("athena:daily_graph", tomorrow.unix_timestamp())
-            .await?;
+            .await
+            .wrap_err("Failed to set TTL of 'athena:daily_graph'")?;
+
+        tracing::info!(
+            ttl_set = is_set,
+            key = "athena:daily_graph",
+            "Updated daily graphs"
+        );
 
         Ok(())
     }
 
     pub async fn get_daily_historic_graphs(&self) -> Result<Vec<ScoreAggregateResponse>> {
-        tracing::debug!("Getting daily historic graphs");
-        let ttl: i64 = self.cache().await.ttl("athena:daily_graph").await?;
+        let span = tracing::debug_span!("get_daily_historic_graphs", key = "athena:daily_graph");
+        tracing::debug!(parent: &span, "Getting daily historic graphs");
+        let ttl: i64 = self
+            .cache()
+            .await
+            .ttl("athena:daily_graph")
+            .await
+            .inspect_err(|e| tracing::warn!(parent: &span, "Failed to get TTL: {e}"))
+            .wrap_err("Failed to get TTL of 'athena:daily_graph'")?;
+
+        let mut graph = vec![];
 
         if ttl <= 0 {
             tracing::debug!(key = "athena:daily_graph", ttl, "Cache entry expired");
-            let graph: Vec<_> = self
+            graph = self
                 .database()
                 .get_daily_historic_graphs()
-                .await?
+                .await
+                .wrap_err("Failed to get 'athena:daily_graph'")?
                 .iter()
                 .map(|v| ScoreAggregateResponse::from(v))
                 .collect();
-            self.set_daily_historic_graphs(&graph).await?;
+            tracing::debug!(parent: &span, "Got value from cache");
+
+            self.set_daily_historic_graphs(&graph)
+                .await
+                .wrap_err("Failed to set 'athena:daily_graph'")?;
+            tracing::debug!(parent: &span, "Set value to cache");
         } else {
+            let serialized: String = self
+                .cache()
+                .await
+                .json_get("athena:daily_graph", "$")
+                .await
+                .wrap_err("Failed to re-get 'athena:daily_graph'")?;
+            graph = parse_json_root(&serialized, "athena:daily_graph")
+                .wrap_err("Failed to parse 'athena:daily_graph'")?;
             tracing::debug!(key = "athena:daily_graph", ttl, "Cache hit");
         }
 
-        let serialized: String = self
-            .cache()
-            .await
-            .json_get("athena:daily_graph", "$")
-            .await?;
-        let value: Vec<ScoreAggregateResponse> =
-            parse_json_root(&serialized, "athena:daily_graph")?;
-
-        Ok(value)
+        Ok(graph)
     }
 }
 
